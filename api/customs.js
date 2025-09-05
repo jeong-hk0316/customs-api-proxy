@@ -4,10 +4,10 @@ const xml2js = require('xml2js');
 module.exports = async (req, res) => {
   const parser = new xml2js.Parser({
     explicitArray: false,
-    ignoreAttrs: true
+    ignoreAttrs: true,
   });
 
-  // 숫자 안전 파싱(콤마/공백 제거)
+  // 숫자 안전 파싱
   const toNum = (v) => {
     if (v === null || v === undefined) return 0;
     const s = String(v).replace(/,/g, '').trim();
@@ -19,12 +19,31 @@ module.exports = async (req, res) => {
   const kgToTon = (kg) => +(kg / 1000).toFixed(3);
   const krwThousand = (usd, fx) => Math.round((usd * fx) / 1000);
 
+  // YYYYMM 증가
+  const nextYYYYMM = (yyyymm) => {
+    let y = parseInt(yyyymm.slice(0, 4), 10);
+    let m = parseInt(yyyymm.slice(4, 6), 10) + 1;
+    if (m > 12) { y += 1; m = 1; }
+    return `${y}${String(m).padStart(2, '0')}`;
+  };
+
+  // yyyymm 범위 생성
+  const rangeYYYYMM = (start, end) => {
+    const out = [];
+    let cur = start;
+    while (cur <= end) {
+      out.push(cur);
+      cur = nextYYYYMM(cur);
+    }
+    return out;
+  };
+
   try {
     const { hsSgn, startDate, endDate, granularity = 'monthly' } = req.query;
 
     if (!hsSgn || !startDate || !endDate) {
       return res.status(400).json({
-        error: '필수 파라미터: hsSgn(HS코드), startDate(시작년월:YYYYMM), endDate(종료년월:YYYYMM)'
+        error: '필수 파라미터: hsSgn(HS코드), startDate(YYYYMM), endDate(YYYYMM)',
       });
     }
     if (!['monthly', 'annual'].includes(granularity)) {
@@ -32,9 +51,7 @@ module.exports = async (req, res) => {
     }
 
     // -------------------------------
-    // 1) 환율 조회 (수입 기준: weekFxrtTpcd=2)
-    //    - 월별 평균: 각 YYYYMM에 대해 1일자 기준 호출 후 USD 환율 추출(가용 데이터 기준)
-    //    - 연도 평균: 월별을 모아 연도별 평균으로 집계
+    // 1) 환율 조회(수입 기준)
     // -------------------------------
     const SERVICE_KEY = '3VkSJ0Q0/cRKftezt4f/L899ZRVB7IBNc/r8fSqbf5yBFrjXoZP19XZXfceKbp9zwffD4hO+BOyzHxBaiRynSg==';
     const exchangeUrl = 'https://apis.data.go.kr/1220000/retrieveTrifFxrtInfo/getRetrieveTrifFxrtInfo';
@@ -42,147 +59,148 @@ module.exports = async (req, res) => {
     const annualFx = {};  // { '2024': 1318, ... }
 
     try {
-      const startYear = parseInt(startDate.substring(0, 4));
-      const startMonth = parseInt(startDate.substring(4, 6));
-      const endYear = parseInt(endDate.substring(0, 4));
-      const endMonth = parseInt(endDate.substring(4, 6));
+      const yyyymmList = rangeYYYYMM(startDate, endDate);
+      const fxBucketsByYear = {};
 
-      for (let year = startYear; year <= endYear; year++) {
-        const monthStart = (year === startYear) ? startMonth : 1;
-        const monthEnd = (year === endYear) ? endMonth : 12;
+      for (const yyyymm of yyyymmList) {
+        const dateStr = `${yyyymm}01`;
+        const rsp = await axios.get(exchangeUrl, {
+          params: {
+            serviceKey: SERVICE_KEY,
+            aplyBgnDt: dateStr,
+            weekFxrtTpcd: '2', // 수입환율
+          },
+          timeout: 20000,
+        });
 
-        const fxBucket = []; // 해당 연도의 월별 환율 값 모음
-
-        for (let month = monthStart; month <= monthEnd; month++) {
-          const yyyymm = `${year}${String(month).padStart(2, '0')}`;
-          const dateStr = `${yyyymm}01`;
-
-          const rsp = await axios.get(exchangeUrl, {
-            params: {
-              serviceKey: SERVICE_KEY,     // ← 요청대로 하드코딩 유지
-              aplyBgnDt: dateStr,
-              weekFxrtTpcd: '2'           // 수입 환율
-            },
-            timeout: 20000
-          });
-
-          const fxData = await parser.parseStringPromise(rsp.data);
-          const items = fxData?.response?.body?.items?.item || [];
-          const rateItems = Array.isArray(items) ? items : [items];
-          const usdRateObj = rateItems.find((it) => it.currSgn === 'USD');
-
-          if (usdRateObj?.fxrt) {
-            const fx = toNum(usdRateObj.fxrt);
-            if (fx > 0) {
-              monthlyFx[yyyymm] = fx;
-              fxBucket.push(fx);
-            }
-          }
+        const fxData = await parser.parseStringPromise(rsp.data);
+        const items = fxData?.response?.body?.items?.item || [];
+        const list = Array.isArray(items) ? items : [items];
+        const usd = list.find((it) => it.currSgn === 'USD');
+        const fx = toNum(usd?.fxrt);
+        if (fx > 0) {
+          monthlyFx[yyyymm] = fx;
+          const y = yyyymm.slice(0, 4);
+          fxBucketsByYear[y] = fxBucketsByYear[y] || [];
+          fxBucketsByYear[y].push(fx);
         }
+      }
 
-        if (fxBucket.length) {
-          const avg = Math.round(fxBucket.reduce((a, b) => a + b, 0) / fxBucket.length);
-          annualFx[String(year)] = avg;
+      for (const [year, arr] of Object.entries(fxBucketsByYear)) {
+        if (arr.length) {
+          annualFx[year] = Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
         }
       }
     } catch (e) {
       console.error('환율 조회 실패:', e.message);
     }
 
-    // 기간 전체 평균(폴백용)
     const periodFxList = Object.values(monthlyFx);
     const periodFxAvg = periodFxList.length
       ? Math.round(periodFxList.reduce((a, b) => a + b, 0) / periodFxList.length)
-      : 1100;
+      : 1100; // 폴백
 
     // -------------------------------
-    // 2) 품목별 국가별 수출입 실적 조회
+    // 2) 월별 반복 호출(가장 확실한 방법)
     // -------------------------------
     const tradeUrl = 'https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList';
-    const tradeResponse = await axios.get(tradeUrl, {
-      params: {
-        serviceKey: SERVICE_KEY,          // ← 요청대로 하드코딩 유지
-        strtYymm: startDate,
-        endYymm: endDate,
-        hsSgn
-      },
-      timeout: 20000
-    });
 
-    const tradeData = await parser.parseStringPromise(tradeResponse.data);
-    const rawItems = tradeData?.response?.body?.items?.item || [];
-    const tradeItems = Array.isArray(rawItems) ? rawItems : [rawItems];
-
-    // -------------------------------
-    // 3) 합계/국가별/그루핑(월별 or 연도별)
-    // -------------------------------
     const summary = {
       totalImportUSD: 0,
       totalImportKG: 0,
       totalExportUSD: 0,
       totalExportKG: 0,
-      countries: {}
+      countries: {}, // 전체 기간 국가별 합계
     };
 
-    // 월/연 단위 그루핑 컨테이너
-    const monthlyAgg = {}; // { '202401': { impKg, impUsd, expKg, expUsd } }
-    const annualAgg = {};  // { '2024':   { impKg, impUsd, expKg, expUsd } }
+    const monthlyAgg = {}; // { '202401': { impKg, impUsd, expKg, expUsd, byCountry: {KR:{...}} } }
+    const annualAgg  = {}; // 연도 합계
 
-    for (const item of tradeItems) {
-      // 총계 라인 필터(필드명은 실제 응답 구조에 맞게 조정 필요)
-      if (item?.year === '총계') continue;
+    const months = rangeYYYYMM(startDate, endDate);
 
-      const impUsd = toNum(item?.impDlr);
-      const impKg  = toNum(item?.impWgt);
-      const expUsd = toNum(item?.expDlr);
-      const expKg  = toNum(item?.expWgt);
+    for (const yyyymm of months) {
+      // 해당 월만 조회(합산 방지)
+      const tradeResp = await axios.get(tradeUrl, {
+        params: {
+          serviceKey: SERVICE_KEY,
+          strtYymm: yyyymm,
+          endYymm: yyyymm,
+          hsSgn,
+          // 필요 시: type: 'xml' (기본), imexTp 등 추가 가능
+          // detail/dtlYn 등은 문서별 상이 → 확실하지 않음
+        },
+        timeout: 20000,
+      });
 
-      summary.totalImportUSD += impUsd;
-      summary.totalImportKG  += impKg;
-      summary.totalExportUSD += expUsd;
-      summary.totalExportKG  += expKg;
+      const tradeData = await parser.parseStringPromise(tradeResp.data);
+      const rawItems = tradeData?.response?.body?.items?.item || [];
+      const items = Array.isArray(rawItems) ? rawItems : [rawItems];
 
-      // 국가별 집계
-      const natCode = item?.statCd;
-      if (natCode && natCode !== '-') {
-        const natName = item?.statCdCntnKor1 || item?.natNm || natCode;
-        if (!summary.countries[natCode]) {
-          summary.countries[natCode] = {
-            name: natName,
-            importUSD: 0,
-            importKG: 0,
-            exportUSD: 0,
-            exportKG: 0
-          };
-        }
-        summary.countries[natCode].importUSD += impUsd;
-        summary.countries[natCode].importKG += impKg;
-        summary.countries[natCode].exportUSD += expUsd;
-        summary.countries[natCode].exportKG += expKg;
+      // 월 컨테이너
+      if (!monthlyAgg[yyyymm]) {
+        monthlyAgg[yyyymm] = { impKg: 0, impUsd: 0, expKg: 0, expUsd: 0, byCountry: {} };
       }
 
-      // 그루핑 키 (월/연)
-      const yyyymm = item?.yymm || item?.yyyymm || item?.yym || '';
-      const yyyy = yyyymm ? String(yyyymm).slice(0, 4) : (item?.year || '');
+      for (const it of items) {
+        // 일부 API는 합계행이 있을 수 있음 → 방지
+        const isTotalRow =
+          (it?.statCd === '총계') || (it?.year === '총계') || (it?.natNm === '총계');
+        if (isTotalRow) continue;
 
-      if (yyyymm) {
-        if (!monthlyAgg[yyyymm]) monthlyAgg[yyyymm] = { impKg: 0, impUsd: 0, expKg: 0, expUsd: 0 };
-        monthlyAgg[yyyymm].impKg += impKg;
+        const impUsd = toNum(it?.impDlr);
+        const impKg  = toNum(it?.impWgt);
+        const expUsd = toNum(it?.expDlr);
+        const expKg  = toNum(it?.expWgt);
+
+        // 월 집계
         monthlyAgg[yyyymm].impUsd += impUsd;
-        monthlyAgg[yyyymm].expKg += expKg;
+        monthlyAgg[yyyymm].impKg  += impKg;
         monthlyAgg[yyyymm].expUsd += expUsd;
-      }
+        monthlyAgg[yyyymm].expKg  += expKg;
 
-      if (yyyy) {
-        if (!annualAgg[yyyy]) annualAgg[yyyy] = { impKg: 0, impUsd: 0, expKg: 0, expUsd: 0 };
-        annualAgg[yyyy].impKg += impKg;
-        annualAgg[yyyy].impUsd += impUsd;
-        annualAgg[yyyy].expKg += expKg;
-        annualAgg[yyyy].expUsd += expUsd;
+        // 전체 합계
+        summary.totalImportUSD += impUsd;
+        summary.totalImportKG  += impKg;
+        summary.totalExportUSD += expUsd;
+        summary.totalExportKG  += expKg;
+
+        // 국가키
+        const natCode = it?.statCd || it?.natCd || it?.natCode;
+        const natName = it?.statCdCntnKor1 || it?.natNm || natCode || '-';
+
+        if (natCode && natCode !== '-') {
+          // 월별 국가 집계(옵션: 월별 국가표가 필요하면 사용)
+          if (!monthlyAgg[yyyymm].byCountry[natCode]) {
+            monthlyAgg[yyyymm].byCountry[natCode] = { name: natName, impUsd: 0, impKg: 0, expUsd: 0, expKg: 0 };
+          }
+          monthlyAgg[yyyymm].byCountry[natCode].impUsd += impUsd;
+          monthlyAgg[yyyymm].byCountry[natCode].impKg  += impKg;
+          monthlyAgg[yyyymm].byCountry[natCode].expUsd += expUsd;
+          monthlyAgg[yyyymm].byCountry[natCode].expKg  += expKg;
+
+          // 전체 기간 국가 집계
+          if (!summary.countries[natCode]) {
+            summary.countries[natCode] = { name: natName, importUSD: 0, importKG: 0, exportUSD: 0, exportKG: 0 };
+          }
+          summary.countries[natCode].importUSD += impUsd;
+          summary.countries[natCode].importKG  += impKg;
+          summary.countries[natCode].exportUSD += expUsd;
+          summary.countries[natCode].exportKG  += expKg;
+        }
       }
     }
 
-    // 국가별 표(수입액 기준 정렬, 비중 계산)
+    // 연도 합계(월 집계로부터 파생)
+    for (const [k, rec] of Object.entries(monthlyAgg)) {
+      const y = k.slice(0, 4);
+      if (!annualAgg[y]) annualAgg[y] = { impKg: 0, impUsd: 0, expKg: 0, expUsd: 0 };
+      annualAgg[y].impKg += rec.impKg;
+      annualAgg[y].impUsd += rec.impUsd;
+      annualAgg[y].expKg += rec.expKg;
+      annualAgg[y].expUsd += rec.expUsd;
+    }
+
+    // 국가 리스트(비중)
     const countryList = Object.entries(summary.countries).map(([code, data]) => {
       const totalImp = summary.totalImportUSD || 1;
       const totalExp = summary.totalExportUSD || 1;
@@ -194,67 +212,58 @@ module.exports = async (req, res) => {
         exportUSD: data.exportUSD,
         exportKG: data.exportKG,
         importShare: +((data.importUSD / totalImp) * 100).toFixed(1),
-        exportShare: +((data.exportUSD / totalExp) * 100).toFixed(1)
+        exportShare: +((data.exportUSD / totalExp) * 100).toFixed(1),
       };
     }).sort((a, b) => b.importUSD - a.importUSD);
 
     // -------------------------------
-    // 4) details 생성 (요청 단위만 반환)
+    // details 생성
     // -------------------------------
     let details = [];
-
     if (granularity === 'monthly') {
       const keys = Object.keys(monthlyAgg).sort(); // yyyymm 오름차순
       details = keys.map((k) => {
         const rec = monthlyAgg[k];
-        const fx = monthlyFx[k] || periodFxAvg; // 해당 월 평균 → 없으면 기간 평균 폴백
-        const impT = kgToTon(rec.impKg);
-        const expT = kgToTon(rec.expKg);
+        const fx = monthlyFx[k] || periodFxAvg; // 월별 환율, 없으면 기간평균
         return {
           yyyymm: k,
-          importWeightT: impT,
+          importWeightT: kgToTon(rec.impKg),
           importUsd: rec.impUsd,
           importKrwThousand: krwThousand(rec.impUsd, fx),
-          exportWeightT: expT,
+          exportWeightT: kgToTon(rec.expKg),
           exportUsd: rec.expUsd,
           exportKrwThousand: krwThousand(rec.expUsd, fx),
-          fxRate: fx
+          fxRate: fx,
         };
       });
     } else {
-      // annual
       const keys = Object.keys(annualAgg).sort(); // yyyy 오름차순
       details = keys.map((y) => {
         const rec = annualAgg[y];
-        const fx = annualFx[y] || periodFxAvg; // 그 연도 평균 → 없으면 기간 평균 폴백
-        const impT = kgToTon(rec.impKg);
-        const expT = kgToTon(rec.expKg);
+        const fx = annualFx[y] || periodFxAvg;
         return {
           year: y,
-          importWeightT: impT,
+          importWeightT: kgToTon(rec.impKg),
           importUsd: rec.impUsd,
           importKrwThousand: krwThousand(rec.impUsd, fx),
-          exportWeightT: expT,
+          exportWeightT: kgToTon(rec.expKg),
           exportUsd: rec.expUsd,
           exportKrwThousand: krwThousand(rec.expUsd, fx),
-          fxRate: fx
+          fxRate: fx,
         };
       });
     }
 
-    // -------------------------------
-    // 5) 최종 응답
-    // -------------------------------
     const totalBalanceUSD = summary.totalExportUSD - summary.totalImportUSD;
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       period: `${startDate} ~ ${endDate}`,
       hsCode: hsSgn,
       fxMeta: {
         mode: granularity === 'monthly' ? 'monthly' : 'annual',
         source: 'KCS(관세청) 수입환율',
-        periodFxAvg
+        periodFxAvg,
       },
       summary: {
         totalImportUSD: summary.totalImportUSD,
@@ -264,17 +273,17 @@ module.exports = async (req, res) => {
         totalExportKRWThousand: krwThousand(summary.totalExportUSD, periodFxAvg),
         totalExportT: kgToTon(summary.totalExportKG),
         tradeBalanceUSD: totalBalanceUSD,
-        tradeBalanceKRWThousand: krwThousand(totalBalanceUSD, periodFxAvg)
+        tradeBalanceKRWThousand: krwThousand(totalBalanceUSD, periodFxAvg),
       },
-      details,          // 요청 단위만(월별 또는 연도별)
-      countries: countryList
+      details,          // 월별 또는 연도별
+      countries: countryList,
     });
 
   } catch (error) {
     console.error('API Error:', error.message);
-    res.status(500).json({
+    return res.status(500).json({
       error: 'API 호출 실패',
-      message: error.message
+      message: error.message,
     });
   }
 };
