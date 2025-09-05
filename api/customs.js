@@ -200,4 +200,81 @@ module.exports = async (req, res) => {
 
     // -------------------------------
     // 4) details 생성 (요청 단위만 반환)
-    // ------
+    // -------------------------------
+    let details = [];
+
+    if (granularity === 'monthly') {
+      const keys = Object.keys(monthlyAgg).sort(); // yyyymm 오름차순
+      details = keys.map((k) => {
+        const rec = monthlyAgg[k];
+        const fx = monthlyFx[k] || periodFxAvg; // 해당 월 평균 → 없으면 기간 평균 폴백
+        const impT = kgToTon(rec.impKg);
+        const expT = kgToTon(rec.expKg);
+        return {
+          yyyymm: k,
+          importWeightT: impT,
+          importUsd: rec.impUsd,
+          importKrwThousand: krwThousand(rec.impUsd, fx),
+          exportWeightT: expT,
+          exportUsd: rec.expUsd,
+          exportKrwThousand: krwThousand(rec.expUsd, fx),
+          fxRate: fx
+        };
+      });
+    } else {
+      // annual
+      const keys = Object.keys(annualAgg).sort(); // yyyy 오름차순
+      details = keys.map((y) => {
+        const rec = annualAgg[y];
+        const fx = annualFx[y] || periodFxAvg; // 그 연도 평균 → 없으면 기간 평균 폴백
+        const impT = kgToTon(rec.impKg);
+        const expT = kgToTon(rec.expKg);
+        return {
+          year: y,
+          importWeightT: impT,
+          importUsd: rec.impUsd,
+          importKrwThousand: krwThousand(rec.impUsd, fx),
+          exportWeightT: expT,
+          exportUsd: rec.expUsd,
+          exportKrwThousand: krwThousand(rec.expUsd, fx),
+          fxRate: fx
+        };
+      });
+    }
+
+    // -------------------------------
+    // 5) 최종 응답
+    // -------------------------------
+    const totalBalanceUSD = summary.totalExportUSD - summary.totalImportUSD;
+
+    res.status(200).json({
+      success: true,
+      period: `${startDate} ~ ${endDate}`,
+      hsCode: hsSgn,
+      fxMeta: {
+        mode: granularity === 'monthly' ? 'monthly' : 'annual',
+        source: 'KCS(관세청) 수입환율',
+        periodFxAvg
+      },
+      summary: {
+        totalImportUSD: summary.totalImportUSD,
+        totalImportKRWThousand: krwThousand(summary.totalImportUSD, periodFxAvg),
+        totalImportT: kgToTon(summary.totalImportKG),
+        totalExportUSD: summary.totalExportUSD,
+        totalExportKRWThousand: krwThousand(summary.totalExportUSD, periodFxAvg),
+        totalExportT: kgToTon(summary.totalExportKG),
+        tradeBalanceUSD: totalBalanceUSD,
+        tradeBalanceKRWThousand: krwThousand(totalBalanceUSD, periodFxAvg)
+      },
+      details,          // 요청 단위만(월별 또는 연도별)
+      countries: countryList
+    });
+
+  } catch (error) {
+    console.error('API Error:', error.message);
+    res.status(500).json({
+      error: 'API 호출 실패',
+      message: error.message
+    });
+  }
+};
