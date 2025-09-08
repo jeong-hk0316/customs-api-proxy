@@ -1,156 +1,113 @@
-// 중복 제거 유틸리티
+// /api/rss/lib/dedupe.js
 
-// 텍스트 정규화 (중복 검사용)
-function normalizeText(text) {
-  if (!text) return '';
-  
-  return text
-    .replace(/\s+/g, ' ')           // 연속된 공백을 하나로
-    .replace(/[^\w가-힣]/g, '')      // 특수문자 제거 (한글, 영문, 숫자만)
-    .toLowerCase()                   // 소문자 변환
+// ===== 설정(필요시 조정) =====
+const OFFICIAL_DOMAINS =
+  /(me\.go\.kr|moef\.go\.kr|mafra\.go\.kr|mss\.go\.kr|ftc\.go\.kr|mfds\.go\.kr|mnd\.go\.kr|winwingrowth\.or\.kr)/i;
+const KOREA_KR = /korea\.kr/i;
+
+const PREFER = {
+  officialFirst: true,      // 원문(부처) 링크를 korea.kr보다 우선
+  preferKoreaKr: false,     // true면 korea.kr을 우선
+  pressOverNotice: true     // '보도'/'해명'/'참고' > '공지'/'공고'
+};
+
+// ===== 유틸 =====
+function normTitle(s) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[【】\[\]\(\)<>]/g, "")
     .trim();
 }
 
-// URL 정규화
-function normalizeUrl(url) {
-  if (!url) return '';
-  
+function normLink(u) {
+  if (!u) return "";
   try {
-    // 쿼리 파라미터 일부 제거
-    let cleanUrl = url.toLowerCase().trim();
-    
-    // 불필요한 파라미터 제거
-    const paramsToRemove = ['utm_source', 'utm_medium', 'utm_campaign', 'fbclid'];
-    paramsToRemove.forEach(param => {
-      const regex = new RegExp(`[&?]${param}=[^&]*`, 'gi');
-      cleanUrl = cleanUrl.replace(regex, '');
-    });
-    
-    return cleanUrl;
-  } catch (error) {
-    return url.toLowerCase();
+    const url = new URL(u);
+    return `${url.hostname.toLowerCase()}${url.pathname}`; // 쿼리변수 차이는 무시
+  } catch {
+    return String(u).toLowerCase().trim();
   }
 }
 
-// 중복 키 생성
-function createDedupeKey(item) {
-  const normalizedTitle = normalizeText(item.title);
-  const normalizedUrl = normalizeUrl(item.link);
-  
-  // 제목과 URL을 조합하여 고유 키 생성
-  return `${normalizedTitle}|${normalizedUrl}`;
+function isPressType(t = "") {
+  return /(보도|해명|참고)/.test(t);
+}
+function isNoticeType(t = "") {
+  return /(공지|공고|알림)/.test(t);
 }
 
-// 제목 유사도 검사 (간단한 버전)
-function isSimilarTitle(title1, title2, threshold = 0.8) {
-  const norm1 = normalizeText(title1);
-  const norm2 = normalizeText(title2);
-  
-  if (norm1 === norm2) return true;
-  if (norm1.length === 0 || norm2.length === 0) return false;
-  
-  // 간단한 포함 관계 검사
-  const shorter = norm1.length < norm2.length ? norm1 : norm2;
-  const longer = norm1.length < norm2.length ? norm2 : norm1;
-  
-  if (shorter.length < 10) return false; // 너무 짧은 제목은 유사도 검사 안함
-  
-  return longer.includes(shorter) || shorter.includes(longer);
+function similarTitle(a, b) {
+  const A = normTitle(a);
+  const B = normTitle(b);
+  if (!A || !B) return false;
+  if (A === B) return true;
+  const shorter = A.length <= B.length ? A : B;
+  const longer  = A.length <= B.length ? B : A;
+  // 너무 짧은 제목은 오탑합 방지
+  if (shorter.length < 10) return false;
+  return longer.includes(shorter);
 }
 
-// 메인 중복 제거 함수
+// 충돌 시 어떤 항목을 남길지 결정
+function chooseBetter(a, b) {
+  const ah = (a.link || "");
+  const bh = (b.link || "");
+  const aOfficial = OFFICIAL_DOMAINS.test(ah);
+  const bOfficial = OFFICIAL_DOMAINS.test(bh);
+  const aKorea = KOREA_KR.test(ah);
+  const bKorea = KOREA_KR.test(bh);
+  const aPress = isPressType(a.type);
+  const bPress = isPressType(b.type);
+
+  // 1) 원문 vs korea.kr 우선순위
+  if (PREFER.officialFirst && aOfficial !== bOfficial) return aOfficial ? a : b;
+  if (PREFER.preferKoreaKr && aKorea !== bKorea)       return aKorea ? a : b;
+
+  // 2) 보도 > 공지
+  if (PREFER.pressOverNotice && aPress !== bPress)     return aPress ? a : b;
+
+  // 3) 정보량(설명 길이) 우선
+  const aLen = (a.description || a.title || "").length;
+  const bLen = (b.description || b.title || "").length;
+  if (aLen !== bLen) return aLen > bLen ? a : b;
+
+  // 4) 링크 길이/경로 복잡도(임의 tie-breaker)
+  return normLink(a.link).length >= normLink(b.link).length ? a : b;
+}
+
+// ===== 메인: 중복 제거 =====
 function dedupe(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return [];
-  }
-  
-  const seen = new Set();
-  const result = [];
-  const titleGroups = [];
-  
-  // 1단계: 정확한 중복 제거 (제목 + URL 기반)
-  for (const item of items) {
-    const key = createDedupeKey(item);
-    
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(item);
-    }
-  }
-  
-  // 2단계: 유사한 제목 중복 제거
-  const finalResult = [];
-  
-  for (const item of result) {
-    let isDuplicate = false;
-    
-    // 기존 그룹과 유사한지 확인
-    for (let i = 0; i < titleGroups.length; i++) {
-      const group = titleGroups[i];
-      
-      if (isSimilarTitle(item.title, group.representative.title)) {
-        isDuplicate = true;
-        
-        // 더 상세한 설명을 가진 것을 선택
-        const currentDesc = item.description || item.title;
-        const groupDesc = group.representative.description || group.representative.title;
-        
-        if (currentDesc.length > groupDesc.length) {
-          // 기존 대표를 새 아이템으로 교체
-          const oldIndex = finalResult.findIndex(x => x === group.representative);
-          if (oldIndex !== -1) {
-            finalResult[oldIndex] = item;
-          }
-          group.representative = item;
-        }
-        break;
-      }
-    }
-    
-    if (!isDuplicate) {
-      titleGroups.push({
-        representative: item
-      });
-      finalResult.push(item);
-    }
-  }
-  
-  return finalResult;
-}
+  if (!Array.isArray(items) || items.length === 0) return [];
 
-// 부처별 우선순위 적용
-function prioritizedDedupe(items) {
-  if (!Array.isArray(items)) return [];
-  
-  const deduped = dedupe(items);
-  
-  // korea.kr 소스 우선순위 적용
-  const priorityMap = new Map();
-  
-  deduped.forEach(item => {
-    const titleKey = normalizeText(item.title);
-    
-    if (!priorityMap.has(titleKey)) {
-      priorityMap.set(titleKey, item);
+  // 1단계: (제목, host/path) 기반 정확 중복 제거
+  const exact = new Map(); // key = normTitle + '|' + normLink
+  for (const it of items) {
+    const key = `${normTitle(it.title)}|${normLink(it.link)}`;
+    const prev = exact.get(key);
+    exact.set(key, prev ? chooseBetter(prev, it) : it);
+  }
+  const stage1 = [...exact.values()];
+
+  // 2단계: 유사 제목 병합 (제목만으로 그룹)
+  const groups = new Map(); // key = 대표제목
+  for (const it of stage1) {
+    const t = normTitle(it.title);
+    let chosenKey = null;
+
+    for (const k of groups.keys()) {
+      if (similarTitle(t, k)) { chosenKey = k; break; }
+    }
+
+    if (!chosenKey) {
+      groups.set(t, it);
     } else {
-      const existing = priorityMap.get(titleKey);
-      
-      // korea.kr 소스를 우선으로 선택
-      if (item.link && item.link.includes('korea.kr') && 
-          existing.link && !existing.link.includes('korea.kr')) {
-        priorityMap.set(titleKey, item);
-      }
-      // 보도자료가 공지보다 우선
-      else if (item.type && item.type.includes('보도') && 
-               existing.type && !existing.type.includes('보도')) {
-        priorityMap.set(titleKey, item);
-      }
+      const prev = groups.get(chosenKey);
+      groups.set(chosenKey, chooseBetter(prev, it));
     }
-  });
-  
-  return Array.from(priorityMap.values());
+  }
+
+  return [...groups.values()];
 }
 
-module.exports = {
-  dedupe: prioritizedDedupe // 기본적으로 우선순위가 적용된 중복제거 사용
-};
+module.exports = { dedupe };
