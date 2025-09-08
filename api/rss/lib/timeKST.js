@@ -1,88 +1,114 @@
-// KST 시간 처리 유틸리티
+// /api/rss/lib/timeKST.js
+// KST(Asia/Seoul) 전용 시간 유틸 + 한국형 날짜 파서(환경부/공정위 대응)
 
-// 기본값: 어제부터 오늘까지 (KST)
+// 현재 시각(KST)
+function kstNow() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
+}
+
+// 어제~오늘(KST) 기본 구간 or from/to(YYYY-MM-DD) 지정 구간
 function dateRangeKST(from, to) {
-  const now = new Date();
-  const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000)); // UTC+9
-  
+  const now = kstNow();
   let start, end;
-  
+
   if (from) {
-    // YYYY-MM-DD 형식
+    // YYYY-MM-DDT00:00:00+09:00
     start = new Date(`${from}T00:00:00+09:00`);
   } else {
-    // 어제 00:00 KST
-    const yesterday = new Date(kstNow);
-    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
     start = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 0, 0, 0);
   }
-  
+
   if (to) {
-    // YYYY-MM-DD 형식
     end = new Date(`${to}T23:59:59+09:00`);
   } else {
-    // 오늘 23:59 KST
-    end = new Date(kstNow.getFullYear(), kstNow.getMonth(), kstNow.getDate(), 23, 59, 59);
+    end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
   }
-  
+
   return { start, end };
 }
 
-// 날짜를 YYYY-MM-DD 형식으로 포맷 (KST)
+// YYYY-MM-DD (KST) 포맷
 function formatYMDKST(date) {
-  if (!date) return '';
-  
-  const kstDate = new Date(date.getTime() + (9 * 60 * 60 * 1000));
-  const year = kstDate.getFullYear();
-  const month = String(kstDate.getMonth() + 1).padStart(2, '0');
-  const day = String(kstDate.getDate()).padStart(2, '0');
-  
-  return `${year}-${month}-${day}`;
+  if (!date) return "";
+  // 입력이 UTC든 로컬이든 KST 캘린더 기준으로 YYYY-MM-DD만 출력하면 충분
+  const d = new Date(date);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
-// 한국어 날짜 파싱 (다양한 형식 지원)
-function parseKoreanDate(dateStr) {
-  if (!dateStr) return null;
-  
+// 한국/기관 사이트에서 흔한 날짜 문자열을 Date로 변환
+// - 지원: RFC1123/ISO 표준, YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, MM-DD, MM.DD, "N월 N일"
+// - 실패 시: today(KST)로 fallback하여 누락 방지
+function parseKoreanDate(dateStr, { fallbackToToday = true } = {}) {
+  if (!dateStr) return fallbackToToday ? kstNow() : null;
+
   try {
-    // 기본 Date 파싱 시도
-    const basicDate = new Date(dateStr);
-    if (!isNaN(basicDate.getTime())) {
-      return basicDate;
+    // 1) 표준 파싱 시도
+    const basic = new Date(dateStr);
+    if (!isNaN(basic)) return basic;
+
+    const s = String(dateStr).trim();
+
+    // 2) YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD
+    let m = s.match(/(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})/);
+    if (m) {
+      const [, y, mo, da] = m;
+      return new Date(`${y}-${String(mo).padStart(2, "0")}-${String(da).padStart(2, "0")}T12:00:00+09:00`);
     }
-    
-    // YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형식
-    const standardMatch = dateStr.match(/(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})/);
-    if (standardMatch) {
-      const [, year, month, day] = standardMatch;
-      return new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T12:00:00+09:00`);
+
+    // 3) MM-DD / MM.DD / MM/DD → 올해로 가정
+    m = s.match(/(?:^|\s)(\d{1,2})[.\-\/](\d{1,2})(?:\s|$)/);
+    if (m) {
+      const [, mo, da] = m;
+      const y = kstNow().getFullYear();
+      return new Date(`${y}-${String(mo).padStart(2, "0")}-${String(da).padStart(2, "0")}T12:00:00+09:00`);
     }
-    
-    // MM-DD 형식 (현재 년도로 가정)
-    const shortMatch = dateStr.match(/(\d{1,2})[.\-\/](\d{1,2})/);
-    if (shortMatch) {
-      const [, month, day] = shortMatch;
-      const currentYear = new Date().getFullYear();
-      return new Date(`${currentYear}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T12:00:00+09:00`);
+
+    // 4) "N월 N일"
+    m = s.match(/(\d{1,2})월\s*(\d{1,2})일/);
+    if (m) {
+      const [, mo, da] = m;
+      const y = kstNow().getFullYear();
+      return new Date(`${y}-${String(mo).padStart(2, "0")}-${String(da).padStart(2, "0")}T12:00:00+09:00`);
     }
-    
-    // "N월 N일" 형식
-    const koreanMatch = dateStr.match(/(\d{1,2})월\s*(\d{1,2})일/);
-    if (koreanMatch) {
-      const [, month, day] = koreanMatch;
-      const currentYear = new Date().getFullYear();
-      return new Date(`${currentYear}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T12:00:00+09:00`);
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('Date parsing error:', error);
-    return null;
+
+    return fallbackToToday ? kstNow() : null;
+  } catch (e) {
+    console.error("[parseKoreanDate] error:", e);
+    return fallbackToToday ? kstNow() : null;
   }
 }
 
+// pubDate가 없거나 특이 포맷일 때 title/description에서 날짜를 추출하는 보조 함수
+function coerceItemDate({ pubDate, title, description }, { fallbackToToday = true } = {}) {
+  // 1) pubDate 우선
+  let d = parseKoreanDate(pubDate, { fallbackToToday: false });
+  if (d) return d;
+
+  // 2) title에서 추출
+  if (title) {
+    d = parseKoreanDate(title, { fallbackToToday: false });
+    if (d) return d;
+  }
+
+  // 3) description에서 추출
+  if (description) {
+    d = parseKoreanDate(description, { fallbackToToday: false });
+    if (d) return d;
+  }
+
+  // 4) 그래도 없으면 오늘 날짜
+  return fallbackToToday ? kstNow() : null;
+}
+
 module.exports = {
+  kstNow,
   dateRangeKST,
   formatYMDKST,
-  parseKoreanDate
+  parseKoreanDate,
+  coerceItemDate
 };
