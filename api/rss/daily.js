@@ -1,4 +1,3 @@
-// /api/rss/daily.js
 const { FEEDS } = require("./lib/rssFeeds");
 const { fetchRSS, fetchHTMLList, fetchHTMLListME, fetchHTMLListKCCP, normalizeRSSItem } = require("./lib/fetchers");
 const { dedupe } = require("./lib/dedupe");
@@ -8,8 +7,8 @@ const { dateRangeKST, formatYMDKST, coerceItemDate } = require("./lib/timeKST");
 module.exports = async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
-    const from = url.searchParams.get("from");
-    const to   = url.searchParams.get("to");
+    const from = url.searchParams.get("from"); // YYYY-MM-DD
+    const to   = url.searchParams.get("to");   // YYYY-MM-DD
     const { start, end } = dateRangeKST(from, to);
 
     const all = [];
@@ -44,7 +43,7 @@ module.exports = async (req, res) => {
                 all.push({ dateYMD: formatYMDKST(d), type, ministry, title: r.title, link: r.link, description: r.title });
               }
             }
-          } else if (format === "html_kccp") { // 동반성장위원회
+          } else if (format === "html_kccp") {
             const rows = await fetchHTMLListKCCP(url);
             for (const r of rows) {
               const d = coerceItemDate({ pubDate: r.pubDate, title: r.title, description: null }, { fallbackToToday: false });
