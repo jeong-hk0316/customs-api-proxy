@@ -1,4 +1,6 @@
-// 텍스트 정규화 (중복 제거용)
+// 중복 제거 유틸리티
+
+// 텍스트 정규화 (중복 검사용)
 function normalizeText(text) {
   if (!text) return '';
   
@@ -14,15 +16,17 @@ function normalizeUrl(url) {
   if (!url) return '';
   
   try {
-    const urlObj = new URL(url);
+    // 쿼리 파라미터 일부 제거
+    let cleanUrl = url.toLowerCase().trim();
     
-    // 쿼리 파라미터 제거 (일부 불필요한 것들)
+    // 불필요한 파라미터 제거
     const paramsToRemove = ['utm_source', 'utm_medium', 'utm_campaign', 'fbclid'];
     paramsToRemove.forEach(param => {
-      urlObj.searchParams.delete(param);
+      const regex = new RegExp(`[&?]${param}=[^&]*`, 'gi');
+      cleanUrl = cleanUrl.replace(regex, '');
     });
     
-    return urlObj.href.toLowerCase();
+    return cleanUrl;
   } catch (error) {
     return url.toLowerCase();
   }
@@ -37,29 +41,30 @@ function createDedupeKey(item) {
   return `${normalizedTitle}|${normalizedUrl}`;
 }
 
-// 두 아이템이 유사한지 확인 (제목 유사도 기반)
+// 제목 유사도 검사 (간단한 버전)
 function isSimilarTitle(title1, title2, threshold = 0.8) {
   const norm1 = normalizeText(title1);
   const norm2 = normalizeText(title2);
   
   if (norm1 === norm2) return true;
+  if (norm1.length === 0 || norm2.length === 0) return false;
   
-  // 간단한 문자열 유사도 계산 (Jaccard Index)
-  const set1 = new Set(norm1.split(''));
-  const set2 = new Set(norm2.split(''));
+  // 간단한 포함 관계 검사
+  const shorter = norm1.length < norm2.length ? norm1 : norm2;
+  const longer = norm1.length < norm2.length ? norm2 : norm1;
   
-  const intersection = new Set([...set1].filter(x => set2.has(x)));
-  const union = new Set([...set1, ...set2]);
+  if (shorter.length < 10) return false; // 너무 짧은 제목은 유사도 검사 안함
   
-  const similarity = intersection.size / union.size;
-  return similarity >= threshold;
+  return longer.includes(shorter) || shorter.includes(longer);
 }
 
-// 중복 제거 메인 함수
-export function removeDuplicates(items) {
-  if (!Array.isArray(items)) return [];
+// 메인 중복 제거 함수
+function dedupe(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return [];
+  }
   
-  const seenKeys = new Set();
+  const seen = new Set();
   const result = [];
   const titleGroups = [];
   
@@ -67,8 +72,8 @@ export function removeDuplicates(items) {
   for (const item of items) {
     const key = createDedupeKey(item);
     
-    if (!seenKeys.has(key)) {
-      seenKeys.add(key);
+    if (!seen.has(key)) {
+      seen.add(key);
       result.push(item);
     }
   }
@@ -79,14 +84,20 @@ export function removeDuplicates(items) {
   for (const item of result) {
     let isDuplicate = false;
     
-    for (const group of titleGroups) {
+    // 기존 그룹과 유사한지 확인
+    for (let i = 0; i < titleGroups.length; i++) {
+      const group = titleGroups[i];
+      
       if (isSimilarTitle(item.title, group.representative.title)) {
         isDuplicate = true;
         
-        // 더 상세한 정보를 가진 것을 선택
-        if (item.description.length > group.representative.description.length) {
+        // 더 상세한 설명을 가진 것을 선택
+        const currentDesc = item.description || item.title;
+        const groupDesc = group.representative.description || group.representative.title;
+        
+        if (currentDesc.length > groupDesc.length) {
           // 기존 대표를 새 아이템으로 교체
-          const oldIndex = finalResult.indexOf(group.representative);
+          const oldIndex = finalResult.findIndex(x => x === group.representative);
           if (oldIndex !== -1) {
             finalResult[oldIndex] = item;
           }
@@ -98,8 +109,7 @@ export function removeDuplicates(items) {
     
     if (!isDuplicate) {
       titleGroups.push({
-        representative: item,
-        items: [item]
+        representative: item
       });
       finalResult.push(item);
     }
@@ -108,50 +118,32 @@ export function removeDuplicates(items) {
   return finalResult;
 }
 
-// 같은 부처 내 중복 제거 (더 엄격한 기준)
-export function removeDepartmentDuplicates(items) {
-  const departmentGroups = {};
+// 부처별 우선순위 적용
+function prioritizedDedupe(items) {
+  if (!Array.isArray(items)) return [];
   
-  // 부처별로 그룹화
-  items.forEach(item => {
-    const dept = item.department;
-    if (!departmentGroups[dept]) {
-      departmentGroups[dept] = [];
-    }
-    departmentGroups[dept].push(item);
-  });
+  const deduped = dedupe(items);
   
-  // 각 부처별로 중복 제거
-  const result = [];
-  Object.values(departmentGroups).forEach(deptItems => {
-    result.push(...removeDuplicates(deptItems));
-  });
-  
-  return result;
-}
-
-// 우선순위 기반 중복 제거 (korea.kr vs 부처 홈페이지)
-export function prioritizedDedupe(items) {
-  const deduped = removeDuplicates(items);
-  
-  // korea.kr 소스를 우선으로 하는 추가 로직
+  // korea.kr 소스 우선순위 적용
   const priorityMap = new Map();
   
   deduped.forEach(item => {
-    const key = normalizeText(item.title);
+    const titleKey = normalizeText(item.title);
     
-    if (!priorityMap.has(key)) {
-      priorityMap.set(key, item);
+    if (!priorityMap.has(titleKey)) {
+      priorityMap.set(titleKey, item);
     } else {
-      const existing = priorityMap.get(key);
+      const existing = priorityMap.get(titleKey);
       
-      // korea.kr 소스 우선
-      if (item.link.includes('korea.kr') && !existing.link.includes('korea.kr')) {
-        priorityMap.set(key, item);
+      // korea.kr 소스를 우선으로 선택
+      if (item.link && item.link.includes('korea.kr') && 
+          existing.link && !existing.link.includes('korea.kr')) {
+        priorityMap.set(titleKey, item);
       }
       // 보도자료가 공지보다 우선
-      else if (item.category.includes('보도') && !existing.category.includes('보도')) {
-        priorityMap.set(key, item);
+      else if (item.type && item.type.includes('보도') && 
+               existing.type && !existing.type.includes('보도')) {
+        priorityMap.set(titleKey, item);
       }
     }
   });
@@ -159,8 +151,6 @@ export function prioritizedDedupe(items) {
   return Array.from(priorityMap.values());
 }
 
-export default {
-  removeDuplicates,
-  removeDepartmentDuplicates,
-  prioritizedDedupe
+module.exports = {
+  dedupe: prioritizedDedupe // 기본적으로 우선순위가 적용된 중복제거 사용
 };
