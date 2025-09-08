@@ -1,5 +1,6 @@
+// /api/rss/daily.js
 const { FEEDS } = require("./lib/rssFeeds");
-const { fetchRSS, fetchHTMLList, fetchHTMLListME, normalizeRSSItem } = require("./lib/fetchers");
+const { fetchRSS, fetchHTMLList, fetchHTMLListME, fetchHTMLListKCCP, normalizeRSSItem } = require("./lib/fetchers");
 const { dedupe } = require("./lib/dedupe");
 const { summarizeKo20 } = require("./lib/summarizer");
 const { dateRangeKST, formatYMDKST, coerceItemDate } = require("./lib/timeKST");
@@ -43,6 +44,15 @@ module.exports = async (req, res) => {
                 all.push({ dateYMD: formatYMDKST(d), type, ministry, title: r.title, link: r.link, description: r.title });
               }
             }
+          } else if (format === "html_kccp") { // 동반성장위원회
+            const rows = await fetchHTMLListKCCP(url);
+            for (const r of rows) {
+              const d = coerceItemDate({ pubDate: r.pubDate, title: r.title, description: null }, { fallbackToToday: false });
+              if (!d) continue;
+              if (d >= start && d <= end) {
+                all.push({ dateYMD: formatYMDKST(d), type, ministry, title: r.title, link: r.link, description: r.title });
+              }
+            }
           }
         } catch (e) {
           console.error(`[RSS] ${ministry}/${type} 실패: ${e.message}`);
@@ -58,11 +68,9 @@ module.exports = async (req, res) => {
       const summary = summarizeKo20(it.description || it.title);
       return `| ${it.dateYMD} | ${it.type} | ${it.ministry} | ${summary} | <a href="${it.link}">원문</a> |`;
     });
-    const body = [header, ...rows].join("\n");
-
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).send(body);
+    res.status(200).send([header, ...rows].join("\n"));
   } catch (err) {
     res.status(500).send(`수집 실패: ${err.message}`);
   }
