@@ -1,8 +1,7 @@
-import * as cheerio from 'cheerio';
-import { parseKoreanDate, isWithinTimeRange, formatDateToKST } from './time.js';
+// RSS와 HTML 데이터 가져오기
 
-// RSS XML 파싱
-export async function fetchRSS(url, department, category) {
+// RSS XML 파싱 (cheerio 없이 기본 문자열 파싱)
+async function fetchRSS(url) {
   try {
     const response = await fetch(url, {
       headers: {
@@ -15,33 +14,28 @@ export async function fetchRSS(url, department, category) {
     }
     
     const xmlText = await response.text();
-    const $ = cheerio.load(xmlText, { xmlMode: true });
-    
     const items = [];
     
-    $('item').each((i, elem) => {
-      const $item = $(elem);
-      
-      const title = $item.find('title').text().trim();
-      const link = $item.find('link').text().trim();
-      const description = $item.find('description').text().trim();
-      const pubDate = $item.find('pubDate').text().trim();
-      
-      // 날짜 파싱 및 필터링
-      const parsedDate = parseKoreanDate(pubDate) || new Date(pubDate);
-      
-      if (isWithinTimeRange(parsedDate)) {
-        items.push({
-          date: formatDateToKST(parsedDate),
-          category,
-          department,
-          title,
-          description,
-          link,
-          source: 'rss'
-        });
-      }
-    });
+    // 간단한 XML 파싱 (정규식 사용)
+    const itemMatches = xmlText.match(/<item[^>]*>[\s\S]*?<\/item>/gi);
+    
+    if (itemMatches) {
+      itemMatches.forEach(itemXml => {
+        const title = extractXmlTag(itemXml, 'title');
+        const link = extractXmlTag(itemXml, 'link');
+        const description = extractXmlTag(itemXml, 'description');
+        const pubDate = extractXmlTag(itemXml, 'pubDate');
+        
+        if (title && link) {
+          items.push({
+            title: cleanHtml(title),
+            link: link.trim(),
+            description: cleanHtml(description || ''),
+            pubDate: pubDate || ''
+          });
+        }
+      });
+    }
     
     return items;
     
@@ -51,8 +45,8 @@ export async function fetchRSS(url, department, category) {
   }
 }
 
-// HTML 스크래핑 (RSS가 없는 경우)
-export async function fetchHTML(url, department, category) {
+// HTML 리스트 스크래핑 (기본적인 구현)
+async function fetchHTMLList(url) {
   try {
     const response = await fetch(url, {
       headers: {
@@ -65,60 +59,31 @@ export async function fetchHTML(url, department, category) {
     }
     
     const html = await response.text();
-    const $ = cheerio.load(html);
-    
     const items = [];
     
-    // 각 사이트별 선택자 (사이트마다 다름)
-    let selector = '';
-    let titleSelector = '';
-    let linkSelector = '';
-    let dateSelector = '';
+    // 간단한 HTML 파싱 (사이트별로 다를 수 있음)
+    // 일반적인 테이블 형태의 공지사항 파싱
+    const tableRowMatches = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi);
     
-    if (url.includes('ftc.go.kr')) {
-      // 공정거래위원회
-      selector = 'table tbody tr';
-      titleSelector = 'td:nth-child(2) a';
-      linkSelector = 'td:nth-child(2) a';
-      dateSelector = 'td:nth-child(3)';
-    } else if (url.includes('mnd.go.kr')) {
-      // 국방부
-      selector = '.board_list tbody tr';
-      titleSelector = '.subject a';
-      linkSelector = '.subject a';
-      dateSelector = '.date';
-    }
-    
-    if (selector) {
-      $(selector).each((i, elem) => {
-        if (i >= 20) return false; // 최대 20개만
-        
-        const $row = $(elem);
-        
-        const titleElem = $row.find(titleSelector);
-        const title = titleElem.text().trim();
-        const relativeLink = titleElem.attr('href');
-        
-        if (!title || !relativeLink) return;
-        
-        // 상대 링크를 절대 링크로 변환
-        const link = relativeLink.startsWith('http') 
-          ? relativeLink 
-          : new URL(relativeLink, url).href;
-        
-        const dateText = $row.find(dateSelector).text().trim();
-        const parsedDate = parseKoreanDate(dateText);
-        
-        if (parsedDate && isWithinTimeRange(parsedDate)) {
-          items.push({
-            date: formatDateToKST(parsedDate),
-            category,
-            department,
-            title,
-            description: title, // HTML에서는 제목을 설명으로 사용
-            link,
-            source: 'html'
-          });
+    if (tableRowMatches) {
+      tableRowMatches.slice(1, 21).forEach(rowHtml => { // 첫 번째는 헤더, 최대 20개
+        const cells = rowHtml.match(/<td[^>]*>[\s\S]*?<\/td>/gi);
+        if (cells && cells.length >= 2) {
+          const titleCell = cells[1] || cells[0];
+          const dateCell = cells[cells.length - 1]; // 마지막 칸이 보통 날짜
+          
+          const titleMatch = titleCell.match(/<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)<\/a>/i);
+          if (titleMatch) {
+            const link = titleMatch[1];
+            const title = cleanHtml(titleMatch[2]);
+            const dateText = cleanHtml(extractTextFromHtml(dateCell));
+            
+            items.push({
+              title,
+              link: link.startsWith('http') ? link : new URL(link, url).href,
+              pubDate: dateText
+            });
+          }
         }
       });
     }
@@ -131,31 +96,49 @@ export async function fetchHTML(url, department, category) {
   }
 }
 
-// 모든 소스에서 데이터 가져오기
-export async function fetchAllSources(sources) {
-  const allPromises = sources.map(async (source) => {
-    try {
-      let items = [];
-      
-      if (source.type === 'rss') {
-        items = await fetchRSS(source.url, source.department, source.category);
-        
-        // RSS 실패 시 fallback HTML 시도
-        if (items.length === 0 && source.fallbackUrl && source.fallbackType === 'html') {
-          items = await fetchHTML(source.fallbackUrl, source.department, source.category);
-        }
-      } else if (source.type === 'html') {
-        items = await fetchHTML(source.url, source.department, source.category);
-      }
-      
-      return items;
-      
-    } catch (error) {
-      console.error(`Source fetch error:`, error);
-      return [];
-    }
-  });
-  
-  const results = await Promise.all(allPromises);
-  return results.flat();
+// RSS 아이템 정규화
+function normalizeRSSItem(item, ministry, type) {
+  return {
+    title: item.title || '',
+    link: item.link || '',
+    description: item.description || '',
+    pubDate: item.pubDate || '',
+    ministry,
+    type
+  };
 }
+
+// XML 태그에서 내용 추출
+function extractXmlTag(xml, tagName) {
+  const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+  const match = xml.match(regex);
+  return match ? match[1].trim() : '';
+}
+
+// HTML 태그 제거 및 정리
+function cleanHtml(text) {
+  if (!text) return '';
+  
+  return text
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1') // CDATA 제거
+    .replace(/<[^>]*>/g, '') // HTML 태그 제거
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ') // 연속된 공백 제거
+    .trim();
+}
+
+// HTML에서 텍스트만 추출
+function extractTextFromHtml(html) {
+  return html.replace(/<[^>]*>/g, '').trim();
+}
+
+module.exports = {
+  fetchRSS,
+  fetchHTMLList,
+  normalizeRSSItem
+};
