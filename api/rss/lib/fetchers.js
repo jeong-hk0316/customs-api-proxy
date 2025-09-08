@@ -1,15 +1,15 @@
+// /api/rss/lib/fetchers.js
 const { XMLParser } = require("fast-xml-parser");
 const cheerio = require("cheerio");
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
+// 공통: 강한 헤더 + 리다이렉트 추적
 async function robustFetch(url, { referer } = {}) {
   const headers = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Cache-Control": "no-cache",
     ...(referer ? { "Referer": referer } : {})
   };
   const res = await fetch(url, { headers, redirect: "follow" });
@@ -17,67 +17,11 @@ async function robustFetch(url, { referer } = {}) {
   return { ok: res.ok, status: res.status, url: res.url, text };
 }
 
-async function fetchHTMLListME(url) {
-  // 환경부는 me.go.kr / www.me.go.kr 둘 다 존재하므로 둘 다 시도
-  const candidates = [url, url.replace("://me.", "://www.me.")];
-
-  let html = null, finalUrl = null, lastStatus = null;
-
-  for (const u of candidates) {
-    const { ok, status, url: real, text } = await robustFetch(u, { referer: u });
-    lastStatus = status;
-    // 서버가 200이지만 바디는 오류 페이지일 수 있으니 바디도 검사
-    const looks404 = /Page Not Found|요청하신 페이지를 찾을 수 없습니다/i.test(text);
-    if (ok && !looks404) { html = text; finalUrl = real; break; }
-  }
-
-  if (!html) {
-    throw new Error(`ME HTML fetch failed (status=${lastStatus}) or error page returned`);
-  }
-
-  const $ = cheerio.load(html);
-  const rows = [];
-
-  // 1) 테이블 형태
-  $("table tbody tr").each((_, el) => {
-    const a = $(el).find("a[href*='read.do']");
-    if (!a.length) return;
-    const title = a.text().replace(/\s+/g, " ").trim();
-    const href = a.attr("href");
-    if (!title || !href) return;
-    const link = new URL(href, finalUrl).toString();
-
-    let dateCell = "";
-    $(el).find("td").each((__, td) => {
-      const t = $(td).text().trim();
-      if (/(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})/.test(t)) dateCell = t;
-    });
-    if (!dateCell) dateCell = $(el).find("td").last().text().trim();
-
-    rows.push({ title, link, pubDate: dateCell });
-  });
-
-  // 2) 리스트(ul/li) 백업
-  if (rows.length === 0) {
-    $("li a[href*='read.do']").each((_, el) => {
-      const a = $(el);
-      const title = a.text().replace(/\s+/g, " ").trim();
-      const href = a.attr("href");
-      if (!title || !href) return;
-      const link = new URL(href, finalUrl).toString();
-      const date = a.closest("li").text().match(/(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})/)?.[1] || "";
-      rows.push({ title, link, pubDate: date.trim() });
-    });
-  }
-
-  return rows;
-}
-
+// ───────────────── RSS
 async function fetchRSS(url) {
   const res = await fetch(url, {
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
+      "User-Agent": "Mozilla/5.0",
       "Accept": "application/rss+xml,application/xml;q=0.9,*/*;q=0.8"
     },
     redirect: "follow"
@@ -89,6 +33,7 @@ async function fetchRSS(url) {
   return Array.isArray(items) ? items : [items];
 }
 
+// ───────────────── 공정위(공지) 기본 HTML 파서
 async function fetchHTMLList(url) {
   const { ok, status, text, url: real } = await robustFetch(url, { referer: url });
   if (!ok) throw new Error(`HTML fetch failed: ${status}`);
@@ -106,6 +51,98 @@ async function fetchHTMLList(url) {
   return rows;
 }
 
+// ───────────────── 환경부 전용 HTML 파서
+async function fetchHTMLListME(url) {
+  const candidates = [url, url.replace("://me.", "://www.me.")];
+  let html = null, finalUrl = null, lastStatus = null;
+  for (const u of candidates) {
+    const { ok, status, url: real, text } = await robustFetch(u, { referer: u });
+    lastStatus = status;
+    const looks404 = /Page Not Found|요청하신 페이지를 찾을 수 없습니다/i.test(text);
+    if (ok && !looks404) { html = text; finalUrl = real; break; }
+  }
+  if (!html) throw new Error(`ME HTML fetch failed (status=${lastStatus}) or error page returned`);
+
+  const $ = cheerio.load(html);
+  const rows = [];
+  $("table tbody tr").each((_, el) => {
+    const a = $(el).find("a[href*='read.do']");
+    if (!a.length) return;
+    const title = a.text().replace(/\s+/g, " ").trim();
+    const href = a.attr("href");
+    if (!title || !href) return;
+    const link = new URL(href, finalUrl).toString();
+    let date = "";
+    $(el).find("td").each((__, td) => {
+      const t = $(td).text().trim();
+      if (/(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})/.test(t)) date = t;
+    });
+    if (!date) date = $(el).find("td").last().text().trim();
+    rows.push({ title, link, pubDate: date });
+  });
+  if (rows.length === 0) {
+    $("li a[href*='read.do']").each((_, el) => {
+      const a = $(el);
+      const title = a.text().replace(/\s+/g, " ").trim();
+      const href = a.attr("href");
+      if (!title || !href) return;
+      const link = new URL(href, finalUrl).toString();
+      const date = a.closest("li").text().match(/(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})/)?.[1] || "";
+      rows.push({ title, link, pubDate: date.trim() });
+    });
+  }
+  return rows;
+}
+
+// ───────────────── 동반성장위원회 전용 HTML 파서
+// 목록 URL 예:
+//   - 보도자료: https://www.winwingrowth.or.kr/site/board/news/nv_newsList.do?menuId=12
+//   - 공지사항: https://www.winwingrowth.or.kr/site/board/notice/nv_noticeList.do?menuId=11
+async function fetchHTMLListKCCP(url) {
+  const { ok, status, text, url: real } = await robustFetch(url, { referer: url });
+  if (!ok) throw new Error(`KCCP HTML fetch failed: ${status}`);
+
+  const $ = cheerio.load(text);
+  const rows = [];
+
+  // 1) 테이블 기반
+  $("table tbody tr").each((_, el) => {
+    // a: 제목 링크 (view로 가는 링크가 보통 포함됨: nv_newsView.do / nv_noticeView.do / view)
+    let a = $(el).find("a[href*='View'], a[href*='view'], a[href*='nv_newsView'], a[href*='nv_noticeView']");
+    if (!a.length) a = $(el).find("a[href]");
+    const title = a.text().replace(/\s+/g, " ").trim();
+    const href = a.attr("href");
+    if (!title || !href) return;
+    const link = new URL(href, real).toString();
+
+    // 날짜: 마지막 td 또는 '등록일' 칼럼
+    let date = "";
+    $(el).find("td").each((__, td) => {
+      const t = $(td).text().trim();
+      if (/(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})/.test(t)) date = t;
+    });
+    if (!date) date = $(el).find("td").last().text().trim();
+
+    rows.push({ title, link, pubDate: date });
+  });
+
+  // 2) 리스트(ul/li) 백업
+  if (rows.length === 0) {
+    $("li a[href]").each((_, el) => {
+      const a = $(el);
+      const title = a.text().replace(/\s+/g, " ").trim();
+      const href = a.attr("href");
+      if (!title || !href) return;
+      const link = new URL(href, real).toString();
+      const date = a.closest("li").text().match(/(\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2})/)?.[1] || "";
+      rows.push({ title, link, pubDate: date.trim() });
+    });
+  }
+
+  return rows;
+}
+
+// ───────────────── 공통: RSS 아이템 정규화
 function normalizeRSSItem(it, fallbackMinistry, fallbackType) {
   const title = it.title || it["dc:title"] || "";
   const link = it.link?.href || it.link || it.guid || "";
@@ -121,4 +158,11 @@ function normalizeRSSItem(it, fallbackMinistry, fallbackType) {
   };
 }
 
-module.exports = { fetchRSS, fetchHTMLList, fetchHTMLListME, normalizeRSSItem };
+module.exports = {
+  fetchRSS,
+  fetchHTMLList,
+  fetchHTMLListME,
+  fetchHTMLListKCCP, // ← 추가
+  normalizeRSSItem,
+  robustFetch // 필요 시 재사용
+};
