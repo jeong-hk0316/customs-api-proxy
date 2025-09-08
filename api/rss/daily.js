@@ -1,6 +1,5 @@
-// /api/rss/daily.js
 const { FEEDS } = require("./lib/rssFeeds");
-const { fetchRSS, fetchHTMLList, normalizeRSSItem } = require("./lib/fetchers");
+const { fetchRSS, fetchHTMLList, fetchHTMLListME, normalizeRSSItem } = require("./lib/fetchers");
 const { dedupe } = require("./lib/dedupe");
 const { summarizeKo20 } = require("./lib/summarizer");
 const { dateRangeKST, formatYMDKST, coerceItemDate } = require("./lib/timeKST");
@@ -8,8 +7,8 @@ const { dateRangeKST, formatYMDKST, coerceItemDate } = require("./lib/timeKST");
 module.exports = async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
-    const from = url.searchParams.get("from"); // YYYY-MM-DD
-    const to   = url.searchParams.get("to");   // YYYY-MM-DD
+    const from = url.searchParams.get("from");
+    const to   = url.searchParams.get("to");
     const { start, end } = dateRangeKST(from, to);
 
     const all = [];
@@ -20,41 +19,28 @@ module.exports = async (req, res) => {
             const items = await fetchRSS(url);
             for (const it of items) {
               const n = normalizeRSSItem(it, ministry, type);
-              // 환경부 대응: pubDate 없으면 title/description에서 날짜 추출 → 오늘 fallback
-              const d = coerceItemDate(
-                { pubDate: n.pubDate, title: n.title, description: n.description },
-                { fallbackToToday: true }
-              );
+              const d = coerceItemDate({ pubDate: n.pubDate, title: n.title, description: n.description }, { fallbackToToday: true });
               if (!d) continue;
               if (d >= start && d <= end) {
-                all.push({
-                  dateYMD: formatYMDKST(d),
-                  type,
-                  ministry,
-                  title: n.title,
-                  link: n.link,
-                  description: n.description
-                });
+                all.push({ dateYMD: formatYMDKST(d), type, ministry, title: n.title, link: n.link, description: n.description });
               }
             }
           } else if (format === "html") {
             const rows = await fetchHTMLList(url);
             for (const r of rows) {
-              // HTML 목록은 pubDate 문자열이 표준이 아닐 수 있으므로 동일 로직 사용
-              const d = coerceItemDate(
-                { pubDate: r.pubDate, title: r.title, description: null },
-                { fallbackToToday: false } // HTML 목록은 날짜 칸을 신뢰하는 편 → 없으면 제외
-              );
+              const d = coerceItemDate({ pubDate: r.pubDate, title: r.title, description: null }, { fallbackToToday: false });
               if (!d) continue;
               if (d >= start && d <= end) {
-                all.push({
-                  dateYMD: formatYMDKST(d),
-                  type,
-                  ministry,
-                  title: r.title,
-                  link: r.link,
-                  description: r.title // HTML은 본문 없음 → 제목을 요약에 사용
-                });
+                all.push({ dateYMD: formatYMDKST(d), type, ministry, title: r.title, link: r.link, description: r.title });
+              }
+            }
+          } else if (format === "html_me") {
+            const rows = await fetchHTMLListME(url);
+            for (const r of rows) {
+              const d = coerceItemDate({ pubDate: r.pubDate, title: r.title, description: null }, { fallbackToToday: false });
+              if (!d) continue;
+              if (d >= start && d <= end) {
+                all.push({ dateYMD: formatYMDKST(d), type, ministry, title: r.title, link: r.link, description: r.title });
               }
             }
           }
@@ -64,20 +50,11 @@ module.exports = async (req, res) => {
       })
     );
 
-    // 중복 제거 (korea.kr vs 부처 원문 등)
-    const unique = dedupe(
-      all.map((it) => ({
-        ...it,
-        title: it.title.replace(/<[^>]+>/g, " ").trim()
-      }))
-    );
-
-    // 최신순(날짜 내림차순)
+    const unique = dedupe(all.map(it => ({ ...it, title: it.title.replace(/<[^>]+>/g, " ").trim() })));
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
 
-    // 마크다운 표 출력
     const header = "| 기사 날짜 | 구분 | 부처 | 내용(간략하게) | 원문 |\n|---|---|---|---|---|";
-    const rows = unique.map((it) => {
+    const rows = unique.map(it => {
       const summary = summarizeKo20(it.description || it.title);
       return `| ${it.dateYMD} | ${it.type} | ${it.ministry} | ${summary} | <a href="${it.link}">원문</a> |`;
     });
