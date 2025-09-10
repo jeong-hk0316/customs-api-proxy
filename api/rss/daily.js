@@ -63,7 +63,7 @@ module.exports = async (req, res) => {
     const unique = dedupe(all.map(it => ({ ...it, title: it.title.replace(/<[^>]+>/g, " ").trim() })));
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
     
-    // 구분 컬럼 제거, 내용 컬럼 확장
+    // 내용 컬럼을 중앙정렬 + 넓은 너비로
     const header = "| 날짜 | 부처 | 내용 | 링크 |\n|:---:|:---:|:----------:|:---:|";
     
     const rows = unique.map(it => {
