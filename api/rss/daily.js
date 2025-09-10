@@ -64,7 +64,7 @@ module.exports = async (req, res) => {
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
     
     // 내용 컬럼을 중앙정렬 + 넓은 너비로
-    const header = "| 날짜 | 부처 | 내용 | 링크 |\n|:---:|:---:|:----------:|:---:|";
+    const header = "| 날짜 | 부처 | 내용 | 링크 |\n|:--:|:--:|:-------------:|:-:|";
     
     const rows = unique.map(it => {
       const summary = summarizeKo20(it.description || it.title);
