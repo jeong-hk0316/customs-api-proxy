@@ -10,8 +10,9 @@ module.exports = async (req, res) => {
     const from = url.searchParams.get("from"); // YYYY-MM-DD
     const to   = url.searchParams.get("to");   // YYYY-MM-DD
     const { start, end } = dateRangeKST(from, to);
-
+    
     const all = [];
+    
     await Promise.all(
       FEEDS.map(async ({ ministry, type, url, format }) => {
         try {
@@ -58,18 +59,22 @@ module.exports = async (req, res) => {
         }
       })
     );
-
+    
     const unique = dedupe(all.map(it => ({ ...it, title: it.title.replace(/<[^>]+>/g, " ").trim() })));
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
-
-    const header = "| 기사 날짜 | 부처 | 내용(간략하게) | 원문 |\n|--|--|-------|--|";
+    
+    // 컬럼 너비 조정된 헤더 (제목 컬럼을 넓게)
+    const header = "| 날짜 | 구분 | 부처 | 제목 | 링크 |\n|:---:|:---:|:---:|:-----------|:---:|";
+    
     const rows = unique.map(it => {
       const summary = summarizeKo20(it.description || it.title);
       return `| ${it.dateYMD} | ${it.type} | ${it.ministry} | ${summary} | <a href="${it.link}">원문</a> |`;
     });
+    
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.status(200).send([header, ...rows].join("\n"));
+    
   } catch (err) {
     res.status(500).send(`수집 실패: ${err.message}`);
   }
