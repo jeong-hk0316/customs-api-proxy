@@ -93,7 +93,7 @@ function smartTruncate(text, maxLength) {
 }
 
 // 100자 내외 한국어 요약 생성
-function summarizeKo20(text, maxLength = 100) {
+function summarizeKo20(text, maxLength = 80) {
   if (!text) return '정보 확인';
   
   const fullText = text.trim();
