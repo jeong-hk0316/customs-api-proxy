@@ -153,11 +153,22 @@ function summarizeKo20(text, maxLength = 20) {
   
   let summary = '';
   
-  // 3. 요약 전략 (우선순위별)
-  if (keywords.length >= 2 && actionKeyword) {
-    // 최적: 키워드 + 액션
-    const mainKeywords = keywords.slice(0, 2).join(' ');
-    summary = `${mainKeywords} ${actionKeyword}`;
+  // 3. 요약 전략 (20자 최대한 활용)
+  if (keywords.length >= 3 && actionKeyword) {
+    // 최적: 키워드 3개 + 액션
+    const mainKeywords = keywords.slice(0, 3).join(' ');
+    const combined = `${mainKeywords} ${actionKeyword}`;
+    if (combined.length <= maxLength) {
+      summary = combined;
+    } else {
+      summary = keywords.slice(0, 2).join(' ') + ` ${actionKeyword}`;
+    }
+  } else if (keywords.length >= 3) {
+    // 키워드 3개 조합
+    summary = keywords.slice(0, 3).join(' ');
+  } else if (keywords.length >= 2 && actionKeyword) {
+    // 키워드 2개 + 액션
+    summary = `${keywords.slice(0, 2).join(' ')} ${actionKeyword}`;
   } else if (keywords.length >= 2) {
     // 키워드 2개 조합
     summary = keywords.slice(0, 2).join(' ');
