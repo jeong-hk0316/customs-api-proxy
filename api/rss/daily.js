@@ -63,12 +63,12 @@ module.exports = async (req, res) => {
     const unique = dedupe(all.map(it => ({ ...it, title: it.title.replace(/<[^>]+>/g, " ").trim() })));
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
     
-    // 컬럼 너비 조정된 헤더 (제목 컬럼을 넓게)
-    const header = "| 날짜 | 구분 | 부처 | 제목 | 링크 |\n|:---:|:---:|:---:|:-----------|:---:|";
+    // 구분 컬럼 제거, 내용 컬럼 확장
+    const header = "| 날짜 | 부처 | 내용 | 링크 |\n|:---:|:---:|:----|:---:|";
     
     const rows = unique.map(it => {
       const summary = summarizeKo20(it.description || it.title);
-      return `| ${it.dateYMD} | ${it.type} | ${it.ministry} | ${summary} | <a href="${it.link}">원문</a> |`;
+      return `| ${it.dateYMD} | ${it.ministry} | ${summary} | <a href="${it.link}">원문</a> |`;
     });
     
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
