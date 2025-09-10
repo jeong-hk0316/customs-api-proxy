@@ -62,7 +62,7 @@ module.exports = async (req, res) => {
     const unique = dedupe(all.map(it => ({ ...it, title: it.title.replace(/<[^>]+>/g, " ").trim() })));
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
 
-    const header = "| 기사 날짜 | 구분 | 부처 | 내용(간략하게) | 원문 |\n|---|---|---|---|---|";
+    const header = "| 기사 날짜 | 부처 | 내용(간략하게) | 원문 |\n|---|---|---|---|---|";
     const rows = unique.map(it => {
       const summary = summarizeKo20(it.description || it.title);
       return `| ${it.dateYMD} | ${it.type} | ${it.ministry} | ${summary} | <a href="${it.link}">원문</a> |`;
