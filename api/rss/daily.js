@@ -64,7 +64,7 @@ module.exports = async (req, res) => {
     unique.sort((a, b) => (a.dateYMD < b.dateYMD ? 1 : a.dateYMD > b.dateYMD ? -1 : 0));
     
     // 구분 컬럼 제거, 내용 컬럼 확장
-    const header = "| 날짜 | 부처 | 내용 | 링크 |\n|:---:|:---:|:----|:---:|";
+    const header = "| 날짜 | 부처 | 내용 | 링크 |\n|:---:|:---:|:----------:|:---:|";
     
     const rows = unique.map(it => {
       const summary = summarizeKo20(it.description || it.title);
